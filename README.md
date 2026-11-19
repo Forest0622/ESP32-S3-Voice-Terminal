@@ -185,7 +185,30 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 - 固件 `usb_link.c` 装 `usb_serial_jtag` driver（console 走 UART0，USB 口空闲，不冲突），按行读 `@@` 前缀的 JSON，交给 `ws_handle_json()` —— **和 WiFi 通道共用同一套指令分发**
 - 网关 `serial_link.py` 自动发现 `/dev/cu.usbmodem*`（ESP32-S3 重新枚举后端口号会变，如 `21401` → `21301`，这里做了通配匹配），读到的 JSON 进 `handle_upstream()`，`broadcast()` 也同步写一份到串口
 - 音频（PCM）**不走 USB**：串口传二进制要额外分包协议，收益低；WiFi 通了音频自然恢复
-- 扫描的坑：`WIFI_EVENT_STA_DISCONNECTED` 里无条件 `esp_wifi_connect()` 会形成死循环，STA 永远停在 connecting，`esp_wifi_scan_start` 每次报 `ESP_ERR_WIFI_STATE`（12294）。修法是加 `s_scanning` 闸门，扫描期间禁止自动重连，扫完再放开
+
+### 扫描功能（v1.5.1 修好）
+
+`WIFI_EVENT_STA_DISCONNECTED` 里无条件 `esp_wifi_connect()` 会形成「断开→重连」死循环，STA 永远停在 connecting，`esp_wifi_scan_start` 每次报 `ESP_ERR_WIFI_STATE`（12294）——这就是 1.4.0 扫描从来没真正work过的原因。
+
+1.5.1 的做法：
+
+1. 扫描前把 `s_scanning` 闸门置 true，**禁止自动重连**
+2. `esp_wifi_disconnect()` + 500ms 等状态机落停
+3. 显式设置 `scan_time.active.min=200 / max=400`（不设的话在 connected 场景下会秒回空表）
+4. `esp_wifi_scan_start(&sc, true)` 阻塞扫全信道，失败重试 3 次
+5. 各出口清闸门并 `esp_wifi_connect()` 恢复连接
+6. `wifi_mgr_set_credentials` 开头强制 `s_scanning = false`——**这是 1.5.0 翻车的地方**，闸门不清零会挡住配网的重连，导致切网 45 秒也连不上、反复回滚
+
+实测：扫到 9~10 个 AP，耗时 4.6 秒；扫描期间 WiFi 链路短暂断开，扫完自动连回，控制台几秒内恢复。
+
+**注意**：切换网络时如果控制台扫描按钮不可用，可以直接手填 SSID + 密码，不依赖扫描。
+
+### 换网/失联时的恢复顺序（v1.5.1）
+
+1. Mac 换网后 IP 会变 → 控制台固定用 `http://127.0.0.1:8765/`，不要用旧 IP
+2. 设备 NVS 里的凭据优先于编译期默认值 → 如果它记着一个已关闭的热点，会一直 RSSI 0
+3. 控制台「WiFi 切换」不生效时，用 `idf.py erase-flash` 清 NVS，让固件回落到 `CONFIG_VOICE_WIFI_SSID`
+4. 清完必须重新 `flash`，否则烧录的固件还是旧的
 
 ## 协议
 
