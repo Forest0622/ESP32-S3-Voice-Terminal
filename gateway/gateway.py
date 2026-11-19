@@ -21,6 +21,7 @@ import collections
 import json
 import logging
 import os
+import socket
 import subprocess
 import tempfile
 import time
@@ -261,6 +262,7 @@ async def api_status() -> dict[str, Any]:
         "speech_rate": SPEECH_RATE,
         "voice": VOICE,
         "usb": serial_link.status(),
+        "server_url": f"ws://{_lan_ip()}:8765/ws" if _lan_ip() else "",
         "uptime": round(time.time() - START_TS, 1),
     }
 
@@ -408,17 +410,51 @@ class WifiReq(BaseModel):
     password: str = ""
 
 
+def _lan_ip() -> str:
+    """取本机在当前网络下的真实局域网 IP。
+
+    不能用 UDP connect 选路由：macOS 上 Clash/VPN 的 TUN 网卡会抢占路由，
+    拿回来的是 198.18.x.x（benchmark 测试网段），设备根本连不上。
+    这里直接读 en0（Wi-Fi）的地址，按顺序探测几张常见网卡。
+    """
+    for dev in ("en0", "en1", "en2", "en5", "en6"):
+        try:
+            out = subprocess.run(["ipconfig", "getifaddr", dev],
+                                 capture_output=True, text=True, timeout=3)
+            ip = out.stdout.strip()
+            if ip and not ip.startswith("127.") and not ip.startswith("198.18."):
+                return ip
+        except Exception:
+            continue
+
+    # 兜底：UDP 路由法，同样排除 TUN 网段
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        return "" if ip.startswith("198.18.") else ip
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
 @app.post("/api/wifi")
 async def api_wifi(req: WifiReq) -> dict[str, Any]:
     ssid = req.ssid.strip()
     if not ssid:
         raise HTTPException(400, "SSID 不能为空")
-    sent = await broadcast({"type": "wifi.set", "ssid": ssid, "password": req.password})
+    lan = _lan_ip()
+    server_url = f"ws://{lan}:8765/ws" if lan else ""
+    payload = {"type": "wifi.set", "ssid": ssid, "password": req.password}
+    if server_url:
+        payload["server"] = server_url
+    sent = await broadcast(payload)
     if sent == 0:
         raise HTTPException(503, "没有在线设备")
     # 切换会断连，设备多半来不及回结果；这里只确认已下发，结果看 status 里的 ip/ssid
-    log.info("已下发 WiFi 切换 -> %s", ssid)
-    return {"ok": True, "sent": sent, "ssid": ssid,
+    log.info("已下发 WiFi 切换 -> %s（server=%s）", ssid, server_url or "未附带")
+    return {"ok": True, "sent": sent, "ssid": ssid, "server": server_url,
             "note": "设备重连后若 IP 变化，控制台会在几秒内自动刷新为新的状态"}
 
 

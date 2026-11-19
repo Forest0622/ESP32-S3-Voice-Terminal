@@ -30,3 +30,10 @@ esp_err_t wifi_mgr_scan(void **out, uint16_t *count);
 /* 在线切换 WiFi：写入 NVS 后立即重连。
  * 若新配置在 timeout_ms 内连不上，自动回滚到旧配置，避免设备失联。 */
 esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *password, int timeout_ms);
+
+/* 网关地址（ws://<mac>:8765/ws），优先级 NVS > menuconfig。
+ * 出厂无配置时可由控制台通过 USB 的 wifi.set 一起下发，否则配好网也连不上 WS。 */
+const char *wifi_mgr_server(void);
+
+/* 写入网关地址并持久化 */
+esp_err_t wifi_mgr_set_server(const char *url);

@@ -23,6 +23,9 @@ static EventGroupHandle_t s_events;
 static char s_ip[16] = "0.0.0.0";
 static char s_ssid[33] = "";
 static char s_pass[65] = "";
+/* 网关地址（ws://<mac>:8765/ws）。也走 NVS：出厂无任何配置时，
+ * 控制台通过 USB 下发 wifi.set 可以顺带把它写进来，否则配好网也连不上 WS。 */
+static char s_server[96] = "";
 static bool s_started;
 
 /* 扫描期间必须掐掉自动重连：STA_DISCONNECTED → esp_wifi_connect() 会形成死循环，
@@ -75,20 +78,72 @@ static esp_err_t save_creds(const char *ssid, const char *pass)
     return ret;
 }
 
+/* ---------------- 网关地址存取 ---------------- */
+
+static bool load_server(char *out, size_t len)
+{
+    if (out == NULL || len == 0) {
+        return false;
+    }
+    out[0] = 0;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t l = len;
+    bool ok = (nvs_get_str(h, "srv", out, &l) == ESP_OK) && strlen(out) > 0;
+    nvs_close(h);
+    return ok;
+}
+
+esp_err_t wifi_mgr_set_server(const char *url)
+{
+    if (url == NULL || strlen(url) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t ret = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = nvs_set_str(h, "srv", url);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (ret == ESP_OK) {
+        snprintf(s_server, sizeof(s_server), "%s", url);
+        ESP_LOGI(TAG, "网关地址已更新: %s", s_server);
+    }
+    return ret;
+}
+
+const char *wifi_mgr_server(void)
+{
+    if (strlen(s_server) > 0) {
+        return s_server;
+    }
+    return CONFIG_VOICE_SERVER_URL;
+}
+
 /* ---------------- 事件 ---------------- */
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+    /* 没有 SSID 时不要 connect：esp_wifi_connect 返回 ESP_ERR_WIFI_SSID，
+     * 而 DISCONNECTED 事件又再次触发 connect，形成空转刷屏 */
+    bool has_ssid = (strlen(s_ssid) > 0);
+
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (!s_scanning) {
+        if (!s_scanning && has_ssid) {
             esp_wifi_connect();
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_events, BIT_CONNECTED);
         strcpy(s_ip, "0.0.0.0");
         ESP_LOGW(TAG, "断开，重连中");
-        if (!s_scanning) {
+        if (!s_scanning && has_ssid) {
             esp_wifi_connect();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -138,13 +193,20 @@ esp_err_t wifi_mgr_start(void)
         snprintf(s_ssid, sizeof(s_ssid), "%s", CONFIG_VOICE_WIFI_SSID);
         snprintf(s_pass, sizeof(s_pass), "%s", CONFIG_VOICE_WIFI_PASSWORD);
     }
+    if (!load_server(s_server, sizeof(s_server))) {
+        snprintf(s_server, sizeof(s_server), "%s", CONFIG_VOICE_SERVER_URL);
+    }
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
     if (strlen(s_ssid) == 0) {
-        ESP_LOGE(TAG, "未配置 WiFi SSID：可用控制台切换，或在 menuconfig 填 Voice Terminal 项");
-        return ESP_ERR_INVALID_STATE;
+        /* 出厂 / 清空 NVS 后的状态：没有 SSID 也必须把 STA 栈起起来。
+         * 否则 esp_wifi_scan_start 报 ESP_ERR_INVALID_STATE，
+         * 控制台通过 USB 下发的 wifi.set 也无处落地——也就是"没网就再也配不了网"的死锁。 */
+        ESP_LOGW(TAG, "未配置 WiFi SSID：STA 栈已启动，等待控制台下发 wifi.set");
+    } else {
+        ESP_ERROR_CHECK(apply_sta(s_ssid, s_pass));
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(apply_sta(s_ssid, s_pass));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     s_started = true;

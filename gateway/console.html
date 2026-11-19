@@ -94,7 +94,10 @@
       <input id="wPass" type="password" placeholder="密码（开放网络留空）">
       <button class="primary" id="btnWifi">切换</button>
     </div>
-    <div class="hint" id="wHint">切换后设备会短暂断连，若新网络连不上会自动回滚到原网络。</div>
+    <div class="row">
+      <span class="k">网关地址</span><span class="v" id="wServer">—</span>
+    </div>
+    <div class="hint" id="wHint">切换后设备会短暂断连，若新网络连不上会自动回滚到原网络。网关地址随配网一起下发，设备出厂无配置时也能靠这一步恢复。</div>
   </section>
 
   <section class="card">
@@ -205,6 +208,7 @@ async function pollStatus() {
     $('mModel').textContent = '模型 ' + (d.model || '—');
     $('mCur').textContent = d.model || '—';
     $('wCur').textContent = dev.ssid || '—';
+    $('wServer').textContent = d.server_url || '—';
     if (document.activeElement !== $('vol')) $('vol').value = d.volume;
     $('volOut').textContent = d.volume;
     if (document.activeElement !== $('rate')) $('rate').value = d.speech_rate;

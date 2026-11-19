@@ -51,6 +51,7 @@ static const char *state_text_of(const char *value)
 typedef struct {
     char ssid[33];
     char pass[65];
+    char server[96];   /* 可选的网关地址，出厂无配置时由控制台一起下发 */
 } wifi_req_t;
 
 static void wifi_scan_task(void *arg)
@@ -117,9 +118,25 @@ static void wifi_scan_task(void *arg)
 static void wifi_set_task(void *arg)
 {
     wifi_req_t *req = (wifi_req_t *)arg;
+
+    /* 先把网关地址落盘：出厂状态下 CONFIG_VOICE_SERVER_URL 是空的，
+     * 不写这一步就算 WiFi 连上了，ws_client_start 也会因为空 URI 起不来。 */
+    if (strlen(req->server) > 0) {
+        esp_err_t sret = wifi_mgr_set_server(req->server);
+        if (sret != ESP_OK) {
+            ESP_LOGW(TAG, "写入网关地址失败: %s", esp_err_to_name(sret));
+        }
+    }
+
     /* 45 秒而不是 20 秒：B4-101 这类路由器给 IP 经常要 25~40 秒，
      * 20 秒会把"其实能连上"的网判成失败并回滚 */
     esp_err_t ret = wifi_mgr_set_credentials(req->ssid, req->pass, 45000);
+
+    /* 首次配网成功时 link_task 可能还卡在 wait_connected 上，
+     * WS 还没起来；这里主动补一次启动，出厂态下才会用到（重复调用是幂等的）。 */
+    if (ret == ESP_OK) {
+        ws_client_start();
+    }
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "wifi.result");
@@ -181,7 +198,12 @@ void ws_handle_json(const char *buf)
                 snprintf(req->ssid, sizeof(req->ssid), "%s", jssid->valuestring);
                 snprintf(req->pass, sizeof(req->pass), "%s",
                          cJSON_IsString(jpass) ? jpass->valuestring : "");
-                ESP_LOGI(TAG, "收到 wifi.set -> %s", req->ssid);
+                cJSON *jsrv = cJSON_GetObjectItem(root, "server");
+                if (cJSON_IsString(jsrv)) {
+                    snprintf(req->server, sizeof(req->server), "%s", jsrv->valuestring);
+                }
+                ESP_LOGI(TAG, "收到 wifi.set -> %s（server=%s）", req->ssid,
+                         strlen(req->server) > 0 ? req->server : "未指定");
                 xTaskCreate(wifi_set_task, "wifi_set", 4096, req, 5, NULL);
             }
         }
@@ -318,8 +340,14 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t event_id, void
 
 esp_err_t ws_client_start(void)
 {
+    const char *uri = wifi_mgr_server();
+    if (uri == NULL || strlen(uri) == 0) {
+        ESP_LOGW(TAG, "网关地址为空，跳过 WS 启动（出厂态请先用控制台配网并下发 server）");
+        return ESP_ERR_INVALID_ARG;
+    }
+
     esp_websocket_client_config_t cfg = {
-        .uri = CONFIG_VOICE_SERVER_URL,
+        .uri = uri,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
         .buffer_size = RX_MAX,
@@ -342,7 +370,7 @@ esp_err_t ws_client_start(void)
         return ret;
     }
 
-    ESP_LOGI(TAG, "连接 %s", CONFIG_VOICE_SERVER_URL);
+    ESP_LOGI(TAG, "连接 %s", uri);
     /* hello 由 CONNECTED 事件里的 hello_task 统一上报，此处不重复发 */
     return ESP_OK;
 }
