@@ -218,6 +218,7 @@ async def say(req: SayReq) -> dict[str, Any]:
 
 
 @app.post("/tts")
+@app.post("/api/tts", include_in_schema=False)  # 控制台「试听」按钮走这个别名
 async def tts(req: SayReq) -> dict[str, Any]:
     """跳过 ASR/大模型，直接把文本转成语音广播给设备，用来单独验证喇叭通路"""
     text = req.text[:SAY_CHAR_LIMIT]
