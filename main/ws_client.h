@@ -10,7 +10,14 @@ esp_err_t ws_client_start(void);
 /* 是否已连上网关 */
 bool ws_client_connected(void);
 
-/* 发送原始 JSON 文本 */
+/* 处理一条下行 JSON。WiFi 的 WS 和 USB 串口两条通道共用同一套分发逻辑 */
+void ws_handle_json(const char *buf);
+
+/* 上报自身状态（固件/芯片/IP/SSID/信号）。WiFi 没连上时 IP 为 0.0.0.0，
+ * 但走 USB 一样能让控制台看到设备在 */
+void ws_send_hello(void);
+
+/* 发送原始 JSON 文本。WS 不通时自动改走 USB 串口 */
 esp_err_t ws_send_json(const char *json);
 
 /* 发送 {"type":<type>} */

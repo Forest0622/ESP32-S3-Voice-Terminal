@@ -34,6 +34,8 @@ from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
+from serial_link import serial_link
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s | %(message)s",
@@ -169,7 +171,9 @@ class AskReq(BaseModel):
 
 
 async def broadcast(payload: dict[str, Any]) -> int:
-    """向所有设备广播，返回值是成功发出的数量"""
+    """向所有设备广播，返回值是成功发出的通道数。
+    USB 串口是第二通道：设备没连上 WiFi 或跨网段时，指令靠它送达。"""
+    usb_ok = 1 if serial_link.send_json(payload) else 0
     dead: list[WebSocket] = []
     sent = 0
     for ws in list(clients):
@@ -180,7 +184,7 @@ async def broadcast(payload: dict[str, Any]) -> int:
             dead.append(ws)
     for ws in dead:
         clients.discard(ws)
-    return sent
+    return sent + usb_ok
 
 
 async def broadcast_bytes(data: bytes) -> int:
@@ -249,13 +253,14 @@ async def console_page():
 async def api_status() -> dict[str, Any]:
     return {
         "ok": True,
-        "online": len(clients),
+        "online": len(clients) if clients else (1 if serial_link.connected else 0),
         "device": dict(device_info),
         "model": current_model,
         "prompt": system_prompt,
         "volume": VOLUME,
         "speech_rate": SPEECH_RATE,
         "voice": VOICE,
+        "usb": serial_link.status(),
         "uptime": round(time.time() - START_TS, 1),
     }
 
@@ -393,7 +398,9 @@ async def request_device(payload: dict[str, Any], expect: str, timeout: float) -
 async def api_wifi_scan() -> dict[str, Any]:
     msg = await request_device({"type": "wifi.scan"}, "wifi.list", timeout=15.0)
     return {"ok": bool(msg.get("ok")), "networks": msg.get("networks", []),
-            "current": msg.get("current"), "device_ip": msg.get("ip")}
+            "current": msg.get("current"), "device_ip": msg.get("ip"),
+            # 把设备侧的错误码原样透出，没接 UART 时这是唯一的诊断线索
+            "err": msg.get("err"), "errname": msg.get("errname")}
 
 
 class WifiReq(BaseModel):
@@ -425,7 +432,7 @@ async def api_text(req: ConsoleTextReq) -> dict[str, Any]:
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "内容不能为空")
-    if not clients:
+    if not clients and not serial_link.connected:
         raise HTTPException(503, "没有在线设备")
 
     t0 = time.time()
@@ -762,3 +769,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
             rec = None
         clients.discard(ws)
         log.info("设备断开 %s，在线 %d", peer, len(clients))
+
+
+@app.on_event("startup")
+async def _startup_usb_link() -> None:
+    """USB 串口是控制面的第二通道：插上线就能用，不依赖 WiFi 网段"""
+    serial_link.start(handle_upstream)
+    log.info("USB 串口通道启动，自动发现 /dev/cu.usbmodem*")

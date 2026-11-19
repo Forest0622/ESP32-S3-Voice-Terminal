@@ -17,6 +17,7 @@
 #include "protocol.h"
 #include "sdkconfig.h"
 #include "ui.h"
+#include "usb_link.h"
 #include "wifi_mgr.h"
 
 static const char *TAG = "WS";
@@ -62,6 +63,11 @@ static void wifi_scan_task(void *arg)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "wifi.list");
     cJSON_AddBoolToObject(root, "ok", ret == ESP_OK);
+    if (ret != ESP_OK) {
+        /* 把错误码带回控制台：现场没有 UART 时这是唯一能看到失败原因的地方 */
+        cJSON_AddNumberToObject(root, "err", (int)ret);
+        cJSON_AddStringToObject(root, "errname", esp_err_to_name(ret));
+    }
     cJSON_AddStringToObject(root, "current", wifi_mgr_ssid());
     cJSON_AddStringToObject(root, "ip", wifi_mgr_ip());
     cJSON *arr = cJSON_AddArrayToObject(root, "networks");
@@ -129,7 +135,8 @@ static void wifi_set_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static void handle_json(const char *buf)
+/* 下行 JSON 分发入口。WS 和 USB 两条通道都调这里，避免同一套指令写两遍 */
+void ws_handle_json(const char *buf)
 {
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -198,11 +205,8 @@ static void handle_json(const char *buf)
 
 /* 连上之后上报自身状态：固件、IP、SSID、信号、运行时长。
  * 不能直接在事件回调里调 send，容易和 WS 内部锁打架，所以放独立任务。 */
-static void hello_task(void *arg)
+void ws_send_hello(void)
 {
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(150));
-
     char mac[24] = { 0 };
     uint8_t m[6] = { 0 };
     if (esp_read_mac(m, ESP_MAC_WIFI_STA) == ESP_OK) {
@@ -219,6 +223,13 @@ static void hello_task(void *arg)
     ws_send_json(hello);
     ESP_LOGI(TAG, "上报 hello: ip=%s ssid=%s rssi=%d", wifi_mgr_ip(), wifi_mgr_ssid(),
              wifi_mgr_rssi());
+}
+
+static void hello_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(150));
+    ws_send_hello();
     vTaskDelete(NULL);
 }
 
@@ -289,7 +300,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t event_id, void
             break;
         }
         if (s_rx_len >= ev->payload_len && (ev->op_code & 0x0F) == 0x01) {
-            handle_json(s_rx);
+            ws_handle_json(s_rx);
             s_rx_len = 0;
         }
         break;
@@ -341,13 +352,19 @@ bool ws_client_connected(void)
 
 esp_err_t ws_send_json(const char *json)
 {
-    if (s_client == NULL || !s_connected || json == NULL) {
-        return ESP_ERR_INVALID_STATE;
+    if (json == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-    int len = (int)strlen(json);
-    return esp_websocket_client_send_text(s_client, json, len, pdMS_TO_TICKS(SEND_TIMEOUT)) >= 0
-               ? ESP_OK
-               : ESP_FAIL;
+    if (s_client != NULL && s_connected) {
+        int len = (int)strlen(json);
+        if (esp_websocket_client_send_text(s_client, json, len, pdMS_TO_TICKS(SEND_TIMEOUT)) >=
+            0) {
+            return ESP_OK;
+        }
+    }
+    /* WiFi 通道不通（换网、刚断线、还没配好 WiFi）时改走 USB，
+     * 保证板子插在电脑上时控制台照样能指挥 */
+    return usb_link_send(json);
 }
 
 esp_err_t ws_send_type(const char *type)

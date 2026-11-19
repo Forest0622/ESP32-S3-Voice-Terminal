@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 #include "protocol.h"
 #include "ui.h"
+#include "usb_link.h"
 #include "wifi_mgr.h"
 #include "ws_client.h"
 
@@ -184,6 +185,11 @@ static void link_task(void *arg)
     int waited = 0;
     while (!wifi_mgr_wait_connected(1000)) {
         waited++;
+        /* 连不上网的这段时间，每 10 秒往 USB 报一次自身状态。
+         * 开机那一刻网关往往还没起来，hello 会丢；周期性重报才能让控制台一直看得见设备。 */
+        if (waited % 10 == 0) {
+            ws_send_hello();
+        }
         if (waited == 5) {
             ui_show_message("sys", "WiFi 连接中…");
         }
@@ -223,6 +229,18 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     board_dump_info();
     board_dump_exio();
+
+    /* USB 通道要在 UI 和网络之前起来：没网的时候这是唯一的控制入口 */
+    usb_link_init();
+
+    /* WiFi 栈提前初始化。原先只在 link_task 里初始化，而 link_task 排在
+     * audio_selftest 之后，导致刚开机那几秒控制台一插 USB 就发指令时
+     * wifi_mgr_scan 会因为 !s_started 直接失败。 */
+    wifi_mgr_start();
+
+    /* 开机先把自身信息报一次。此时 WiFi 往往还没连上（IP 是 0.0.0.0），
+     * 但走 USB 也能让控制台立刻看到固件版本、芯片和配置的目标 SSID */
+    ws_send_hello();
 
     ui_init();
     xTaskCreatePinnedToCore(ui_task, "ui", 8192, NULL, 5, NULL, 1);

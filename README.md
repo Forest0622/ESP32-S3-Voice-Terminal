@@ -141,11 +141,13 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 
 ## 控制台（v1.4.0 新增）
 
-浏览器打开 `http://<Mac 的局域网 IP>:8765/` 即可，纯单文件 HTML，不依赖任何前端库。
+**浏览器打开 `http://127.0.0.1:8765/`**。用本机地址而不是网卡 IP：Mac 换到别的 WiFi（热点、别人家网络）后网卡 IP 会变，旧地址就打不开了，而 `127.0.0.1` 永远指向本机。
+
+纯单文件 HTML，不依赖任何前端库。
 
 | 功能 | 说明 |
 |---|---|
-| 设备状态 | 在线数、IP、当前 SSID、RSSI、固件版本、设备运行时长（由设备 `hello` 上报） |
+| 设备状态 | 在线数、**USB 通道状态**、IP、当前 SSID、RSSI、固件版本、设备运行时长（由设备 `hello` 上报） |
 | WiFi 切换 | 扫描周边热点（同 SSID 的多个 AP 已合并并保留最强信号），点选后填密码切换 |
 | 模型 | 列出本机 Ollama 已装模型，一键切换；切换前先校验模型确实存在 |
 | 对话 | 打字直接走 Ollama + TTS，设备语音播报，显示生成耗时与语音时长 |
@@ -161,6 +163,29 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 **切换失败会回滚**：新配置 20 秒内连不上，自动恢复旧凭据并重连，设备不会失联。
 
 **切换过程必然断连**：换网卡会断开现有 WebSocket，设备重连后重新 `hello`，控制台轮询 2 秒内就会显示新 IP。
+
+### 两条链路：WiFi + USB（v1.5.0 新增）
+
+| 通道 | 承担什么 | 前提 |
+|---|---|---|
+| WiFi（WebSocket） | 主链路：对话文本、录音上行、TTS 音频下行 | Mac 与设备在**同一网段** |
+| USB 串口 | 备用控制链路：配网、扫描、音量、文字播报、状态上报 | **只要插着数据线**，不管在不在同一网络 |
+
+换网之后 Mac 和设备往往就分居两个网段了（例如 Mac 连了手机热点，设备还记着旧 WiFi），WiFi 链路废掉，但 USB 链路照样通——**这就是 "换网后还能配网" 的兜底**。
+
+用法：
+
+1. 数据线插上，浏览器开 `http://127.0.0.1:8765/`
+2. 设备状态卡片看「USB」一行，显示 `已连接 /dev/cu.usbmodem*` 即通
+3. 「WiFi 切换」→ 扫描周边 → 选网络 → 填密码 → 切换
+4. 设备连上新网络后自动重连 WiFi 链路，音频功能恢复
+
+实现要点：
+
+- 固件 `usb_link.c` 装 `usb_serial_jtag` driver（console 走 UART0，USB 口空闲，不冲突），按行读 `@@` 前缀的 JSON，交给 `ws_handle_json()` —— **和 WiFi 通道共用同一套指令分发**
+- 网关 `serial_link.py` 自动发现 `/dev/cu.usbmodem*`（ESP32-S3 重新枚举后端口号会变，如 `21401` → `21301`，这里做了通配匹配），读到的 JSON 进 `handle_upstream()`，`broadcast()` 也同步写一份到串口
+- 音频（PCM）**不走 USB**：串口传二进制要额外分包协议，收益低；WiFi 通了音频自然恢复
+- 扫描的坑：`WIFI_EVENT_STA_DISCONNECTED` 里无条件 `esp_wifi_connect()` 会形成死循环，STA 永远停在 connecting，`esp_wifi_scan_start` 每次报 `ESP_ERR_WIFI_STATE`（12294）。修法是加 `s_scanning` 闸门，扫描期间禁止自动重连，扫完再放开
 
 ## 协议
 

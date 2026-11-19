@@ -8,6 +8,7 @@ idf_component_register(
         "font_cjk16.c"
         "es8388.c"
         "audio.c"
+        "usb_link.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
