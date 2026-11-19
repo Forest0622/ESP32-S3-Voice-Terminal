@@ -117,6 +117,16 @@
   </section>
 
   <section class="card">
+    <h2>音色角色</h2>
+    <div class="row"><span class="k">当前</span><span class="v" id="vCur">—</span></div>
+    <div class="row">
+      <select id="selVoice"></select>
+      <button class="primary" id="btnVoice">切换</button>
+    </div>
+    <div class="hint" id="vHint">切换后下一次播报立即生效；音色来自 macOS 系统语音库。</div>
+  </section>
+
+  <section class="card">
     <h2>试听与音量</h2>
     <div class="row">
       <input id="ttsText" placeholder="直接让设备念这句话">
@@ -367,6 +377,25 @@ async function savePrompt(text) {
   });
 }
 
+/* ---------- 音色 ---------- */
+async function loadVoices() {
+  try {
+    const d = await api('/api/voices');
+    const sel = $('selVoice');
+    sel.innerHTML = '';
+    d.voices.forEach(v => {
+      const o = document.createElement('option');
+      o.value = v.id;
+      o.textContent = `${v.name} · ${v.desc}`;
+      if (v.id === d.current) o.selected = true;
+      sel.appendChild(o);
+      if (v.id === d.current) $('vCur').textContent = `${v.name}（${v.desc}）`;
+    });
+  } catch (e) {
+    $('vHint').textContent = '读取音色失败：' + e.message;
+  }
+}
+
 /* ---------- 事件绑定 ---------- */
 $('btnScan').onclick = scanWifi;
 $('btnWifi').onclick = applyWifi;
@@ -380,6 +409,20 @@ $('btnModel').onclick = async () => {
     });
     $('mHint').textContent = '已切换到 ' + name;
     pollStatus();
+  } catch (e) { alert('切换失败：' + e.message); }
+};
+$('btnVoice').onclick = async () => {
+  const id = $('selVoice').value;
+  if (!id) return;
+  try {
+    const r = await api('/api/voice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const list = (await api('/api/voices')).voices;
+    const v = list.find(x => x.id === r.current);
+    $('vCur').textContent = v ? `${v.name}（${v.desc}）` : r.current;
+    $('vHint').textContent = '已切换为 ' + (v ? v.name : r.current) + '，下一次播报生效';
   } catch (e) { alert('切换失败：' + e.message); }
 };
 $('btnSay').onclick = sendText;
@@ -424,6 +467,7 @@ $('btnPromptReset').onclick = async () => {
 /* ---------- 启动 ---------- */
 pollStatus();
 loadModels();
+loadVoices();
 loadPrompt();
 loadHistory();
 loadLogs();

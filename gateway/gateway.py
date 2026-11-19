@@ -49,6 +49,15 @@ PROMPT_DEFAULT = "你是一个语音助手，回答必须用简体中文，控�
 system_prompt = PROMPT_DEFAULT
 VOLUME = 30                     # 设备喇叭模拟音量 0~33（30 约 0dB）
 SPEECH_RATE = 180               # macOS say 语速（词/分钟）
+VOICE = "Tingting"              # 当前音色（对应 say -v 的 voice id）
+
+# 实测能真正合成中文的音色。其余 Eddy / Flo / Sandy / Reed / Rocko / Grandpa /
+# Grandma / Shelley 只输出 4466 字节空音频，不可用，所以不做成选项。
+VOICES = [
+    {"id": "Tingting", "name": "婷婷", "desc": "普通话 · 大陆女声"},
+    {"id": "Meijia", "name": "美佳", "desc": "普通话 · 台湾女声"},
+    {"id": "Sinji", "name": "善怡", "desc": "粤语 · 香港女声"},
+]
 
 CONSOLE_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console.html")
 START_TS = time.time()
@@ -126,12 +135,17 @@ def transcribe_wav(path: str) -> str:
     return text
 
 
-def tts_pcm(text: str) -> bytes:
+def tts_pcm(text: str, voice: str | None = None) -> bytes:
     """用 macOS say 生成 16kHz / 16bit / 单声道裸 PCM"""
+    v = voice or VOICE
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         path = f.name
     try:
-        subprocess.run(["say", "-o", path, "--data-format=LEI16@16000", "-r", str(SPEECH_RATE), text], check=True)
+        subprocess.run(
+            ["say", "-v", v, "-o", path, "--data-format=LEI16@16000",
+             "-r", str(SPEECH_RATE), text],
+            check=True,
+        )
         w = wave.open(path, "rb")
         data = w.readframes(w.getnframes())
         w.close()
@@ -240,8 +254,28 @@ async def api_status() -> dict[str, Any]:
         "prompt": system_prompt,
         "volume": VOLUME,
         "speech_rate": SPEECH_RATE,
+        "voice": VOICE,
         "uptime": round(time.time() - START_TS, 1),
     }
+
+
+@app.get("/api/voices")
+async def api_voices() -> dict[str, Any]:
+    return {"ok": True, "voices": VOICES, "current": VOICE}
+
+
+class VoiceReq(BaseModel):
+    id: str
+
+
+@app.post("/api/voice")
+async def api_voice(req: VoiceReq) -> dict[str, Any]:
+    global VOICE
+    if req.id not in [v["id"] for v in VOICES]:
+        raise HTTPException(404, f"没有音色 {req.id}")
+    VOICE = req.id
+    log.info("音色切换 -> %s", VOICE)
+    return {"ok": True, "current": VOICE}
 
 
 @app.get("/api/models")
