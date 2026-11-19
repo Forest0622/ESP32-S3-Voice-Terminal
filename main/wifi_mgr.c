@@ -25,10 +25,6 @@ static char s_ssid[33] = "";
 static char s_pass[65] = "";
 static bool s_started;
 
-/* 扫描期间必须掐掉自动重连：否则 DISCONNECTED → esp_wifi_connect() 会形成死循环，
- * STA 始终停在 connecting，esp_wifi_scan_start 每次都返回 ESP_ERR_WIFI_STATE。 */
-static volatile bool s_scanning;
-
 /* ---------------- NVS 凭据存取 ---------------- */
 
 static bool load_creds(char *ssid, size_t sl, char *pass, size_t pl)
@@ -80,16 +76,12 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (!s_scanning) {
-            esp_wifi_connect();
-        }
+        esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_events, BIT_CONNECTED);
         strcpy(s_ip, "0.0.0.0");
         ESP_LOGW(TAG, "断开，重连中");
-        if (!s_scanning) {
-            esp_wifi_connect();
-        }
+        esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&evt->ip_info.ip));
@@ -199,54 +191,30 @@ esp_err_t wifi_mgr_scan(void **out, uint16_t *count)
     *out = NULL;
     *count = 0;
 
-    /* STA 停在 connecting 时 scan 必被 ESP_ERR_WIFI_STATE 拒掉。先关掉自动重连
-     * 的闸门，再断开，等状态机真正落停后再扫。 */
-    s_scanning = true;
-    esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(500));
-
     wifi_scan_config_t sc = { 0 };
     sc.show_hidden = false;
-    esp_err_t ret = ESP_FAIL;
-    for (int attempt = 0; attempt < 3; attempt++) {
-        ret = esp_wifi_scan_start(&sc, true); /* 阻塞扫描，约 2~5 秒 */
-        if (ret == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "扫描第 %d 次被拒: %s", attempt + 1, esp_err_to_name(ret));
-        vTaskDelay(pdMS_TO_TICKS(700));
-    }
+    esp_err_t ret = esp_wifi_scan_start(&sc, true); /* 阻塞扫描，约 2~5 秒 */
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "扫描启动失败: %s", esp_err_to_name(ret));
-        s_scanning = false;
-        esp_wifi_connect(); /* 扫完无论成败都恢复连接，别让设备停在断开状态 */
         return ret;
     }
 
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
     if (n == 0) {
-        s_scanning = false;
-        esp_wifi_connect();
         return ESP_OK;
     }
     wifi_ap_record_t *list = calloc(n, sizeof(wifi_ap_record_t));
     if (list == NULL) {
-        s_scanning = false;
-        esp_wifi_connect();
         return ESP_ERR_NO_MEM;
     }
     ret = esp_wifi_scan_get_ap_records(&n, list);
     if (ret != ESP_OK) {
         free(list);
-        s_scanning = false;
-        esp_wifi_connect();
         return ret;
     }
     *out = list;
     *count = n;
-    s_scanning = false;
-    esp_wifi_connect(); /* 闸门关掉，恢复自动重连 */
     return ESP_OK;
 }
 

@@ -117,7 +117,9 @@ static void wifi_scan_task(void *arg)
 static void wifi_set_task(void *arg)
 {
     wifi_req_t *req = (wifi_req_t *)arg;
-    esp_err_t ret = wifi_mgr_set_credentials(req->ssid, req->pass, 20000);
+    /* 45 秒而不是 20 秒：B4-101 这类路由器给 IP 经常要 25~40 秒，
+     * 20 秒会把"其实能连上"的网判成失败并回滚 */
+    esp_err_t ret = wifi_mgr_set_credentials(req->ssid, req->pass, 45000);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "wifi.result");
