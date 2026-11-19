@@ -210,6 +210,33 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 3. 控制台「WiFi 切换」不生效时，用 `idf.py erase-flash` 清 NVS，让固件回落到 `CONFIG_VOICE_WIFI_SSID`
 4. 清完必须重新 `flash`，否则烧录的固件还是旧的
 
+### 出厂零配置如何恢复（v1.5.2）
+
+固件烧进去、NVS 全空、编译期凭据也为空时，设备**没有任何 WiFi 配置**。这种状态下仍然可以用一条 USB 线完成全部配置。
+
+v1.5.1 及以前存在一个死锁：`wifi_mgr_start` 在 SSID 为空时提前 `return`，`esp_wifi_set_mode` / `esp_wifi_start` 都没执行，于是扫描报 `ESP_ERR_INVALID_STATE`、`wifi.set` 也没有落地的 STA 栈——**没网就再也配不了网**。
+
+v1.5.2 的修法：
+
+| 位置 | 改动 |
+|---|---|
+| `wifi_mgr_start` | SSID 为空时不再 return，先启动 STA 栈，只跳过 `apply_sta` |
+| `on_wifi_event` | 加 `has_ssid` 判断，空 SSID 不反复 `esp_wifi_connect` 空转 |
+| 网关地址 | 新增 NVS key `srv`，`wifi.set` 可带 `server` 字段一起下发 |
+| `ws_client_start` | 改用 `wifi_mgr_server()`，空 URI 时明确跳过 |
+| 网关 `api_wifi` | 自动附带 `ws://<lan_ip>:8765/ws` |
+| 网关 `_lan_ip` | 读 `ipconfig getifaddr en0`，排除 `198.18.x.x`（Clash/VPN 的 TUN 段） |
+
+操作步骤：
+
+1. 数据线插上，浏览器开 `http://127.0.0.1:8765/`
+2. 「设备状态」看到 **USB 已连接**，`IP` 显示 `0.0.0.0`、`SSID` 为空——这就是出厂态
+3. 「WiFi 切换」点「扫描周边」选网络（未联网时也能扫，实测 9 个 AP），或直接手填 SSID
+4. 填密码 → 「切换」。网关地址会随配网一起下发，卡片底部能看到当前值
+5. 设备连上后 WS 自动恢复，音频功能可用
+
+实测（出厂态零配置）：USB 下发后 **3.7 秒**拿到 IP，WS 自动连上，播报 4.26 秒、扫描 10 个 AP、音量 30 全部正常。
+
 ## 协议
 
 见 `main/protocol.h`。文本帧是 UTF-8 JSON，音频帧是**二进制**。
