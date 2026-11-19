@@ -22,3 +22,4 @@ gateway/recordings/
 
 # 固件二进制不入库（编译时会把 WiFi 配置打包进去）
 *.bin
+docs/*.png
