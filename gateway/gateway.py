@@ -29,7 +29,7 @@ from typing import Any
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
@@ -57,17 +57,6 @@ VOICES = [
     {"id": "Tingting", "name": "婷婷", "desc": "普通话 · 大陆女声"},
     {"id": "Meijia", "name": "美佳", "desc": "普通话 · 台湾女声"},
     {"id": "Sinji", "name": "善怡", "desc": "粤语 · 香港女声"},
-]
-
-# ---------------- 语音引擎 ----------------
-# say：macOS 系统语音，零依赖、秒出
-# cosyvoice：CosyVoice2 神经网络合成，可零样本克隆任意音色（独立进程，端口 8770）
-ENGINE = "say"
-CV_URL = os.environ.get("CV_URL", "http://127.0.0.1:8770")
-CV_VOICE = "小雅"           # CosyVoice 当前角色
-ENGINES = [
-    {"id": "say", "name": "macOS 系统语音", "desc": "本机中文音色，零依赖、出音最快"},
-    {"id": "cosyvoice", "name": "CosyVoice2", "desc": "神经网络合成，可克隆任意人声"},
 ]
 
 CONSOLE_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console.html")
@@ -146,24 +135,8 @@ def transcribe_wav(path: str) -> str:
     return text
 
 
-def cv_tts(text: str) -> bytes:
-    """走 CosyVoice2 独立服务，取 16kHz / 16bit / 单声道裸 PCM"""
-    speed = max(0.5, min(2.0, SPEECH_RATE / 180.0))
-    try:
-        r = httpx.post(f"{CV_URL}/tts", json={"text": text, "spk": CV_VOICE, "speed": speed},
-                       timeout=180.0)
-    except Exception as exc:
-        raise RuntimeError(f"CosyVoice 服务不可达（{CV_URL}）: {exc}")
-    if r.status_code != 200:
-        raise RuntimeError(f"CosyVoice {r.status_code}: {r.text[:200]}")
-    return r.content
-
-
 def tts_pcm(text: str, voice: str | None = None) -> bytes:
-    """生成 16kHz / 16bit / 单声道裸 PCM，引擎由 ENGINE 决定"""
-    if ENGINE == "cosyvoice":
-        return cv_tts(text)
-
+    """用 macOS say 生成 16kHz / 16bit / 单声道裸 PCM"""
     v = voice or VOICE
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         path = f.name
@@ -282,8 +255,6 @@ async def api_status() -> dict[str, Any]:
         "volume": VOLUME,
         "speech_rate": SPEECH_RATE,
         "voice": VOICE,
-        "engine": ENGINE,
-        "cv_voice": CV_VOICE,
         "uptime": round(time.time() - START_TS, 1),
     }
 
@@ -305,98 +276,6 @@ async def api_voice(req: VoiceReq) -> dict[str, Any]:
     VOICE = req.id
     log.info("音色切换 -> %s", VOICE)
     return {"ok": True, "current": VOICE}
-
-
-# ---------- 语音引擎（say / CosyVoice2） ----------
-
-
-@app.get("/api/engines")
-async def api_engines() -> dict[str, Any]:
-    cv_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as http:
-            r = await http.get(f"{CV_URL}/health")
-            cv_ok = r.status_code == 200 and bool(r.json().get("ok"))
-    except Exception:
-        cv_ok = False
-    return {"ok": True, "engines": ENGINES, "current": ENGINE,
-            "cv_online": cv_ok, "cv_url": CV_URL}
-
-
-class EngineReq(BaseModel):
-    id: str
-
-
-@app.post("/api/engine")
-async def api_engine(req: EngineReq) -> dict[str, Any]:
-    global ENGINE
-    if req.id not in [e["id"] for e in ENGINES]:
-        raise HTTPException(404, f"没有引擎 {req.id}")
-    if req.id == "cosyvoice":
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as http:
-                r = await http.get(f"{CV_URL}/health")
-                r.raise_for_status()
-        except Exception as exc:
-            raise HTTPException(503, f"CosyVoice 服务未启动：{exc}")
-    ENGINE = req.id
-    log.info("语音引擎切换 -> %s", ENGINE)
-    return {"ok": True, "current": ENGINE}
-
-
-@app.get("/api/cv/voices")
-async def api_cv_voices() -> dict[str, Any]:
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.get(f"{CV_URL}/voices")
-            r.raise_for_status()
-            d = r.json()
-    except Exception as exc:
-        return {"ok": False, "error": f"CosyVoice 不可达：{exc}", "voices": [], "current": CV_VOICE}
-    return {"ok": True, "voices": d.get("voices", []), "current": CV_VOICE}
-
-
-class CvVoiceReq(BaseModel):
-    id: str
-
-
-@app.post("/api/cv/voice")
-async def api_cv_voice(req: CvVoiceReq) -> dict[str, Any]:
-    global CV_VOICE
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.get(f"{CV_URL}/voices")
-            r.raise_for_status()
-            ids = [v["id"] for v in r.json().get("voices", [])]
-    except Exception as exc:
-        raise HTTPException(503, f"CosyVoice 不可达：{exc}")
-    if req.id not in ids:
-        raise HTTPException(404, f"没有角色 {req.id}")
-    CV_VOICE = req.id
-    log.info("CosyVoice 角色切换 -> %s", CV_VOICE)
-    return {"ok": True, "current": CV_VOICE}
-
-
-@app.post("/api/cv/voice/add")
-async def api_cv_voice_add(
-    name: str = Form(...),
-    prompt_text: str = Form(""),
-    file: UploadFile = File(...),
-):
-    """上传一段参考音频，在 CosyVoice 里新建一个角色"""
-    data = await file.read()
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as http:
-            files = {"file": (file.filename or "ref.wav", data, "application/octet-stream")}
-            r = await http.post(f"{CV_URL}/voice/add",
-                                data={"name": name, "prompt_text": prompt_text},
-                                files=files)
-    except Exception as exc:
-        raise HTTPException(503, f"CosyVoice 不可达：{exc}")
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text[:200])
-    log.info("新增角色 %s", r.json().get("id"))
-    return r.json()
 
 
 @app.get("/api/models")
