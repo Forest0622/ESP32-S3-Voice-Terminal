@@ -21,7 +21,7 @@
  *   {"type":"pong"}
  */
 
-#define VOICE_FW_VERSION "1.5.2"
+#define VOICE_FW_VERSION "1.5.3"
 
 /* 下行 type 取值 */
 #define MSG_SAY         "say"

@@ -254,6 +254,23 @@ const char *wifi_mgr_ssid(void)
     return s_ssid;
 }
 
+/* 扫描结束的统一出口：清闸门，只有确实没连上时才补一次 connect。
+ * 已连接状态下不要调 esp_wifi_connect：它会返回 ESP_ERR_WIFI_CONN，
+ * 而且没有意义——scan while connected 是 ESP-IDF 支持的，连接本身不需要断。 */
+static void scan_done(uint16_t n, void *list, esp_err_t ret, void **out, uint16_t *count)
+{
+    s_scanning = false;
+    if (!wifi_mgr_connected() && strlen(s_ssid) > 0) {
+        esp_wifi_connect();
+    }
+    if (ret == ESP_OK && n > 0) {
+        *out = list;
+        *count = n;
+    } else if (list != NULL) {
+        free(list);
+    }
+}
+
 esp_err_t wifi_mgr_scan(void **out, uint16_t *count)
 {
     if (!s_started || out == NULL || count == NULL) {
@@ -262,22 +279,28 @@ esp_err_t wifi_mgr_scan(void **out, uint16_t *count)
     *out = NULL;
     *count = 0;
 
-    /* connected 状态下 STA 会一直占着信道和状态机，scan 要么被拒、要么秒回空表。
-     * 先关闸门再断开，等状态机落停后扫描，扫完恢复重连。 */
+    /* 必须断开才能扫到结果，这是实测出来的硬限制，不是设计选择：
+     *   - 不断开（保持 connected）：scan 返回 OK、耗时约 2.6 秒，但结果是 0 个 AP，
+     *     连自己正连着的 AP 都看不到；把 scan_time 加大到 400~800ms 也没用，
+     *     驱动会忽略该参数直接返回。
+     *   - 原因：ESP32 单射频，connected 时射频被占用，驱动无法真正离开发 probe request，
+     *     只能立刻返回空表。
+     * 所以只能短暂断开：断开后射频空闲，才能逐信道扫到真实结果。
+     * 优化点：只等 200ms（不是之前的 500ms），扫完立刻 connect，把断线窗口压到 4~5 秒。 */
     s_scanning = true;
     esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     wifi_scan_config_t sc = { 0 };
     sc.show_hidden = false;
     sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    /* 显式给每个信道留够驻留时间，否则在 connected 场景下会秒回空结果 */
+    /* 13 个信道 × 200~400ms ≈ 2.6~5 秒 */
     sc.scan_time.active.min = 200;
     sc.scan_time.active.max = 400;
 
     esp_err_t ret = ESP_FAIL;
     for (int attempt = 0; attempt < 3; attempt++) {
-        ret = esp_wifi_scan_start(&sc, true); /* 阻塞扫描，全信道约 2~5 秒 */
+        ret = esp_wifi_scan_start(&sc, true); /* 阻塞扫描 */
         if (ret == ESP_OK) {
             break;
         }
@@ -286,35 +309,23 @@ esp_err_t wifi_mgr_scan(void **out, uint16_t *count)
     }
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "扫描启动失败: %s", esp_err_to_name(ret));
-        s_scanning = false;
-        esp_wifi_connect();
+        scan_done(0, NULL, ret, out, count);
         return ret;
     }
 
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
     if (n == 0) {
-        s_scanning = false;
-        esp_wifi_connect();
+        scan_done(0, NULL, ESP_OK, out, count);
         return ESP_OK;
     }
     wifi_ap_record_t *list = calloc(n, sizeof(wifi_ap_record_t));
     if (list == NULL) {
-        s_scanning = false;
-        esp_wifi_connect();
+        scan_done(0, NULL, ESP_ERR_NO_MEM, out, count);
         return ESP_ERR_NO_MEM;
     }
     ret = esp_wifi_scan_get_ap_records(&n, list);
-    if (ret != ESP_OK) {
-        free(list);
-        s_scanning = false;
-        esp_wifi_connect();
-        return ret;
-    }
-    *out = list;
-    *count = n;
-    s_scanning = false;
-    esp_wifi_connect(); /* 闸门关掉，恢复自动重连 */
+    scan_done(n, (void *)list, ret, out, count);
     return ESP_OK;
 }
 
