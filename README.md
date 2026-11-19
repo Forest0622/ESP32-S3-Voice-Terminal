@@ -139,13 +139,35 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 
 **不要用推理模型**：`qwen3:4b` 与 `deepseek-r1:8b` 实测会把思考链当正文吐出来（`think:false` 与 `/no_think` 在该 Ollama 版本下均无效），首句变成"嗯，用户让我……"，且首字延迟 18 秒以上。
 
+## 控制台（v1.4.0 新增）
+
+浏览器打开 `http://<Mac 的局域网 IP>:8765/` 即可，纯单文件 HTML，不依赖任何前端库。
+
+| 功能 | 说明 |
+|---|---|
+| 设备状态 | 在线数、IP、当前 SSID、RSSI、固件版本、设备运行时长（由设备 `hello` 上报） |
+| WiFi 切换 | 扫描周边热点（同 SSID 的多个 AP 已合并并保留最强信号），点选后填密码切换 |
+| 模型 | 列出本机 Ollama 已装模型，一键切换；切换前先校验模型确实存在 |
+| 对话 | 打字直接走 Ollama + TTS，设备语音播报，显示生成耗时与语音时长 |
+| 试听 | 下发任意文本的 TTS，不经过 ASR / LLM |
+| 音量 / 语速 | 音量写 ES8388 模拟输出寄存器（0~33），语速改 `say -r` |
+| 人设 | 在线编辑 system prompt，对下一次对话立即生效 |
+| 对话记录 | 按键对话与控制台对话统一进历史，含耗时 |
+| 网关日志 | 内存环形缓冲 400 行，页面实时刷新 |
+
+**WiFi 凭据写进设备 NVS**：`wifi_mgr` 优先读 NVS，没有才回退到 `menuconfig` 的编译期默认值。所以换网不需要重新编译烧录。
+
+**切换失败会回滚**：新配置 20 秒内连不上，自动恢复旧凭据并重连，设备不会失联。
+
+**切换过程必然断连**：换网卡会断开现有 WebSocket，设备重连后重新 `hello`，控制台轮询 2 秒内就会显示新 IP。
+
 ## 协议
 
 见 `main/protocol.h`。文本帧是 UTF-8 JSON，音频帧是**二进制**。
 
-- 上行文本：`hello`、`key`、`listen.start`、`listen.stop`、`abort`、`text`
+- 上行文本：`hello`（含 `fw` / `chip` / `ip` / `rssi` / `ssid` / `uptime`）、`key`、`listen.start`、`listen.stop`、`abort`、`text`、`wifi.list`、`wifi.result`
 - 上行二进制：录音 PCM（16bit 单声道裸数据），只在 `listen.start` 与 `listen.stop` 之间发送
-- 下行文本：`say`（`final=false` 表示流式覆盖最后一条）、`state`、`clear`
+- 下行文本：`say`（`final=false` 表示流式覆盖最后一条）、`state`、`clear`、`wifi.scan`、`wifi.set`（`ssid` + `password`）、`volume.set`（`value` 0~33）
 - 下行二进制：**TTS PCM**（16bit 单声道裸数据），设备端拼帧后直接送 I2S TX 播放
 
 ## 引脚（已核对）

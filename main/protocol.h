@@ -21,12 +21,19 @@
  *   {"type":"pong"}
  */
 
-#define VOICE_FW_VERSION "1.3.0"
+#define VOICE_FW_VERSION "1.4.0"
 
 /* 下行 type 取值 */
-#define MSG_SAY   "say"
-#define MSG_STATE "state"
-#define MSG_CLEAR "clear"
+#define MSG_SAY         "say"
+#define MSG_STATE       "state"
+#define MSG_CLEAR       "clear"
+#define MSG_WIFI_SCAN   "wifi.scan"   /* 请求扫描周边热点 */
+#define MSG_WIFI_SET    "wifi.set"    /* {ssid,password} 切换 WiFi 并写 NVS */
+#define MSG_VOLUME      "volume.set"  /* {value:0~33} 设置喇叭模拟音量 */
+
+/* 上行 type 取值（设备主动上报） */
+#define MSG_WIFI_LIST   "wifi.list"
+#define MSG_WIFI_RESULT "wifi.result"
 
 /* 状态机取值，与 UI 状态条一一对应 */
 #define ST_IDLE      "idle"

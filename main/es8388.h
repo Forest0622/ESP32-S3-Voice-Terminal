@@ -35,6 +35,9 @@ esp_err_t es8388_adc_enable(bool on);
 /* ADC 数字音量，db 取值 0 ~ -96，0 为最大 */
 esp_err_t es8388_set_adc_volume(int db);
 
+/* 设置喇叭模拟输出音量：0 ~ 33（33 为最大 / 约 +4.5dB，30 约 0dB） */
+esp_err_t es8388_set_output_volume(uint8_t v);
+
 /* 打印 DAC 相关寄存器实际值，用来确认配置真的写进去了 */
 void es8388_dump(void);
 

@@ -1,16 +1,23 @@
 #include "ws_client.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
 #include "audio.h"
+#include "es8388.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp_websocket_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "protocol.h"
 #include "sdkconfig.h"
 #include "ui.h"
+#include "wifi_mgr.h"
 
 static const char *TAG = "WS";
 
@@ -35,6 +42,91 @@ static const char *state_text_of(const char *value)
         return value;
     }
     return ST_IDLE;
+}
+
+/* ---- 控制台下发的设备管理指令 ----
+ * 扫描和切换 WiFi 都会阻塞数秒甚至二十秒，必须放独立任务，不能卡住 WS 收发 */
+
+typedef struct {
+    char ssid[33];
+    char pass[65];
+} wifi_req_t;
+
+static void wifi_scan_task(void *arg)
+{
+    (void)arg;
+    void *list = NULL;
+    uint16_t n = 0;
+    esp_err_t ret = wifi_mgr_scan(&list, &n);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "wifi.list");
+    cJSON_AddBoolToObject(root, "ok", ret == ESP_OK);
+    cJSON_AddStringToObject(root, "current", wifi_mgr_ssid());
+    cJSON_AddStringToObject(root, "ip", wifi_mgr_ip());
+    cJSON *arr = cJSON_AddArrayToObject(root, "networks");
+    wifi_ap_record_t *ap = (wifi_ap_record_t *)list;
+    if (list != NULL) {
+        /* 同一个 SSID 往往有多个 AP（同网多 BSSID），合并成一条并保留最强信号，
+         * 否则控制台列表里会出现十几条同名项，没法选 */
+        uint16_t added = 0;
+        for (uint16_t i = 0; i < n; i++) {
+            if (ap[i].ssid[0] == 0) {
+                continue;
+            }
+            int found = -1;
+            for (uint16_t j = 0; j < added; j++) {
+                if (strcmp((const char *)ap[i].ssid, (const char *)ap[j].ssid) == 0) {
+                    found = j;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                if (ap[i].rssi > ap[found].rssi) {
+                    ap[found] = ap[i];
+                }
+            } else {
+                ap[added++] = ap[i];
+            }
+        }
+        n = added;
+    }
+    for (uint16_t i = 0; list != NULL && i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "ssid", (const char *)ap[i].ssid);
+        cJSON_AddNumberToObject(o, "rssi", ap[i].rssi);
+        cJSON_AddNumberToObject(o, "auth", ap[i].authmode);
+        cJSON_AddItemToArray(arr, o);
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    if (json != NULL) {
+        ws_send_json(json);
+        cJSON_free(json);
+    }
+    cJSON_Delete(root);
+    free(list);
+    vTaskDelete(NULL);
+}
+
+static void wifi_set_task(void *arg)
+{
+    wifi_req_t *req = (wifi_req_t *)arg;
+    esp_err_t ret = wifi_mgr_set_credentials(req->ssid, req->pass, 20000);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "wifi.result");
+    cJSON_AddBoolToObject(root, "ok", ret == ESP_OK);
+    cJSON_AddStringToObject(root, "ssid", wifi_mgr_ssid());
+    cJSON_AddStringToObject(root, "ip", wifi_mgr_ip());
+    char *json = cJSON_PrintUnformatted(root);
+    if (json != NULL) {
+        /* 切换过程中 WS 会断开，这条多半发不出去；重连后 hello 会带上新的 IP */
+        ws_send_json(json);
+        cJSON_free(json);
+    }
+    cJSON_Delete(root);
+    free(req);
+    vTaskDelete(NULL);
 }
 
 static void handle_json(const char *buf)
@@ -64,11 +156,70 @@ static void handle_json(const char *buf)
         ui_set_state(state_text_of(cJSON_IsString(jvalue) ? jvalue->valuestring : NULL));
     } else if (strcmp(type, MSG_CLEAR) == 0) {
         ui_clear();
+    } else if (strcmp(type, MSG_WIFI_SCAN) == 0) {
+        ESP_LOGI(TAG, "收到 wifi.scan，开始扫描");
+        xTaskCreate(wifi_scan_task, "wifi_scan", 4096, NULL, 5, NULL);
+    } else if (strcmp(type, MSG_WIFI_SET) == 0) {
+        cJSON *jssid = cJSON_GetObjectItem(root, "ssid");
+        cJSON *jpass = cJSON_GetObjectItem(root, "password");
+        if (!cJSON_IsString(jssid) || strlen(jssid->valuestring) == 0) {
+            ESP_LOGW(TAG, "wifi.set 缺少 ssid");
+        } else {
+            wifi_req_t *req = calloc(1, sizeof(wifi_req_t));
+            if (req == NULL) {
+                ESP_LOGE(TAG, "wifi.set 申请内存失败");
+            } else {
+                snprintf(req->ssid, sizeof(req->ssid), "%s", jssid->valuestring);
+                snprintf(req->pass, sizeof(req->pass), "%s",
+                         cJSON_IsString(jpass) ? jpass->valuestring : "");
+                ESP_LOGI(TAG, "收到 wifi.set -> %s", req->ssid);
+                xTaskCreate(wifi_set_task, "wifi_set", 4096, req, 5, NULL);
+            }
+        }
+    } else if (strcmp(type, MSG_VOLUME) == 0) {
+        cJSON *jval = cJSON_GetObjectItem(root, "value");
+        if (cJSON_IsNumber(jval)) {
+            int v = jval->valueint;
+            if (v < 0) {
+                v = 0;
+            }
+            if (v > 33) {
+                v = 33;
+            }
+            es8388_set_output_volume((uint8_t)v);
+            ESP_LOGI(TAG, "喇叭音量设为 %d", v);
+        }
     } else {
         ESP_LOGD(TAG, "忽略下行 type=%s", type);
     }
 
     cJSON_Delete(root);
+}
+
+/* 连上之后上报自身状态：固件、IP、SSID、信号、运行时长。
+ * 不能直接在事件回调里调 send，容易和 WS 内部锁打架，所以放独立任务。 */
+static void hello_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    char mac[24] = { 0 };
+    uint8_t m[6] = { 0 };
+    if (esp_read_mac(m, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+
+    char hello[256];
+    snprintf(hello, sizeof(hello),
+             "{\"type\":\"hello\",\"fw\":\"%s\",\"chip\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,"
+             "\"ssid\":\"%s\",\"uptime\":%lu}",
+             VOICE_FW_VERSION, mac, wifi_mgr_ip(), wifi_mgr_rssi(), wifi_mgr_ssid(),
+             (unsigned long)(esp_timer_get_time() / 1000000LL));
+    ws_send_json(hello);
+    ESP_LOGI(TAG, "上报 hello: ip=%s ssid=%s rssi=%d", wifi_mgr_ip(), wifi_mgr_ssid(),
+             wifi_mgr_rssi());
+    vTaskDelete(NULL);
 }
 
 static void on_ws_event(void *arg, esp_event_base_t base, int32_t event_id, void *data)
@@ -83,6 +234,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t event_id, void
         s_rx_len = 0;
         ESP_LOGI(TAG, "已连上网关");
         ui_show_message("sys", "已连接网关");
+        xTaskCreate(hello_task, "hello", 3072, NULL, 4, NULL);
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -153,13 +305,6 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t event_id, void
 
 esp_err_t ws_client_start(void)
 {
-    char mac[24] = { 0 };
-    uint8_t m[6] = { 0 };
-    if (esp_read_mac(m, ESP_MAC_WIFI_STA) == ESP_OK) {
-        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3],
-                 m[4], m[5]);
-    }
-
     esp_websocket_client_config_t cfg = {
         .uri = CONFIG_VOICE_SERVER_URL,
         .reconnect_timeout_ms = 5000,
@@ -185,12 +330,7 @@ esp_err_t ws_client_start(void)
     }
 
     ESP_LOGI(TAG, "连接 %s", CONFIG_VOICE_SERVER_URL);
-
-    char hello[160];
-    snprintf(hello, sizeof(hello),
-             "{\"type\":\"hello\",\"fw\":\"%s\",\"chip\":\"%s\"}", VOICE_FW_VERSION, mac);
-    /* 连上之前发送会失败，交给事件回调触发后补发；这里尝试一次，失败不致命 */
-    ws_send_json(hello);
+    /* hello 由 CONNECTED 事件里的 hello_task 统一上报，此处不重复发 */
     return ESP_OK;
 }
 

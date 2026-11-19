@@ -247,6 +247,18 @@ esp_err_t es8388_write_pcm(const int16_t *data, int samples)
     return ESP_OK;
 }
 
+esp_err_t es8388_set_output_volume(uint8_t v)
+{
+    if (v > 33) {
+        v = 33;
+    }
+    esp_err_t ret = es8388_write_reg(REG_DACCONTROL24, v);
+    ret |= es8388_write_reg(REG_DACCONTROL25, v);
+    ret |= es8388_write_reg(REG_DACCONTROL26, v);
+    ret |= es8388_write_reg(REG_DACCONTROL27, v);
+    return ret;
+}
+
 void es8388_dump(void)
 {
     static const struct {

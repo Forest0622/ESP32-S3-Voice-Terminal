@@ -17,6 +17,7 @@ ESP32-S3 语音终端 - 电脑端网关（第 1 阶段：文本直通 + Ollama �
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -28,7 +29,8 @@ from typing import Any
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
@@ -40,6 +42,34 @@ log = logging.getLogger("gateway")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+
+# ---------------- 控制台可运行时修改的状态 ----------------
+current_model = OLLAMA_MODEL
+PROMPT_DEFAULT = "你是一个语音助手，回答必须用简体中文，控制在 60 字以内，短句口语化，适合直接朗读。"
+system_prompt = PROMPT_DEFAULT
+VOLUME = 30                     # 设备喇叭模拟音量 0~33（30 约 0dB）
+SPEECH_RATE = 180               # macOS say 语速（词/分钟）
+
+CONSOLE_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console.html")
+START_TS = time.time()
+history: collections.deque = collections.deque(maxlen=50)   # 最近对话
+log_lines: collections.deque = collections.deque(maxlen=400)  # 日志环形缓冲
+pending: dict[str, asyncio.Future] = {}                      # 请求-响应配对（如 WiFi 扫描）
+
+
+class _RingLogHandler(logging.Handler):
+    """把日志写进内存环形缓冲，控制台按需拉取"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            log_lines.append(self.format(record))
+        except Exception:
+            pass
+
+
+_ring = _RingLogHandler()
+_ring.setFormatter(logging.Formatter("%(asctime)s %(levelname)s | %(message)s"))
+logging.getLogger().addHandler(_ring)
 # 设备端单条下行报文上限 2048 字节；这里是保守的字符数上限
 SAY_CHAR_LIMIT = 600
 # 上行录音落盘目录（16kHz / 16bit / 单声道）
@@ -101,7 +131,7 @@ def tts_pcm(text: str) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         path = f.name
     try:
-        subprocess.run(["say", "-o", path, "--data-format=LEI16@16000", text], check=True)
+        subprocess.run(["say", "-o", path, "--data-format=LEI16@16000", "-r", str(SPEECH_RATE), text], check=True)
         w = wave.open(path, "rb")
         data = w.readframes(w.getnframes())
         w.close()
@@ -160,7 +190,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "clients": len(clients),
-        "model": OLLAMA_MODEL,
+        "model": current_model,
         "device": device_info,
     }
 
@@ -189,6 +219,231 @@ async def tts(req: SayReq) -> dict[str, Any]:
     return {"bytes": len(pcm), "seconds": round(len(pcm) / 32000.0, 2), "text": text}
 
 
+# ==================== 控制台 ====================
+
+
+@app.get("/", include_in_schema=False)
+async def console_page():
+    """浏览器打开 http://<mac-ip>:8765/ 即为控制台"""
+    if not os.path.exists(CONSOLE_HTML):
+        raise HTTPException(500, "console.html 缺失")
+    return FileResponse(CONSOLE_HTML, media_type="text/html")
+
+
+@app.get("/api/status")
+async def api_status() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "online": len(clients),
+        "device": dict(device_info),
+        "model": current_model,
+        "prompt": system_prompt,
+        "volume": VOLUME,
+        "speech_rate": SPEECH_RATE,
+        "uptime": round(time.time() - START_TS, 1),
+    }
+
+
+@app.get("/api/models")
+async def api_models() -> dict[str, Any]:
+    """列出本机 Ollama 已装模型"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            r = await http.get(f"{OLLAMA_URL}/api/tags")
+            r.raise_for_status()
+            raw = r.json()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "models": [], "current": current_model}
+    models = []
+    for m in raw.get("models", []):
+        size = m.get("size") or 0
+        models.append(
+            {
+                "name": m.get("name"),
+                "size": size,
+                "size_gb": round(size / 1e9, 2) if size else 0,
+                "modified": m.get("modified_at"),
+            }
+        )
+    models.sort(key=lambda x: x["name"] or "")
+    return {"ok": True, "models": models, "current": current_model}
+
+
+class ModelReq(BaseModel):
+    name: str
+
+
+@app.post("/api/model")
+async def api_set_model(req: ModelReq) -> dict[str, Any]:
+    global current_model
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "模型名不能为空")
+    # 确认模型真的存在，避免切到不存在的名字后每次对话都失败
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            r = await http.get(f"{OLLAMA_URL}/api/tags")
+            r.raise_for_status()
+            names = [m.get("name") for m in r.json().get("models", [])]
+    except Exception as exc:
+        raise HTTPException(502, f"读取 Ollama 模型列表失败: {exc}")
+    if name not in names:
+        raise HTTPException(404, f"本机没有模型 {name}")
+    current_model = name
+    log.info("切换模型 -> %s", current_model)
+    return {"ok": True, "current": current_model}
+
+
+@app.post("/api/prompt")
+async def api_set_prompt(req: SayReq) -> dict[str, Any]:
+    global system_prompt
+    system_prompt = req.text.strip() or PROMPT_DEFAULT
+    log.info("人设已更新（%d 字）", len(system_prompt))
+    return {"ok": True, "prompt": system_prompt}
+
+
+@app.get("/api/prompt")
+async def api_get_prompt() -> dict[str, Any]:
+    return {"ok": True, "prompt": system_prompt, "default": PROMPT_DEFAULT}
+
+
+class VolumeReq(BaseModel):
+    value: int
+
+
+@app.post("/api/volume")
+async def api_volume(req: VolumeReq) -> dict[str, Any]:
+    global VOLUME
+    v = max(0, min(33, req.value))
+    sent = await broadcast({"type": "volume.set", "value": v})
+    VOLUME = v
+    return {"ok": True, "value": v, "sent": sent}
+
+
+class RateReq(BaseModel):
+    value: int
+
+
+@app.post("/api/rate")
+async def api_rate(req: RateReq) -> dict[str, Any]:
+    global SPEECH_RATE
+    SPEECH_RATE = max(100, min(320, req.value))
+    return {"ok": True, "value": SPEECH_RATE}
+
+
+@app.post("/api/abort")
+async def api_abort() -> dict[str, Any]:
+    sent = await broadcast({"type": "abort"})
+    await broadcast({"type": "state", "value": "idle"})
+    return {"ok": True, "sent": sent}
+
+
+async def request_device(payload: dict[str, Any], expect: str, timeout: float) -> dict[str, Any]:
+    """下发一条控制指令并等待设备回指定 type 的消息"""
+    sent = await broadcast(payload)
+    if sent == 0:
+        raise HTTPException(503, "没有在线设备")
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    pending[expect] = fut
+    try:
+        return await asyncio.wait_for(fut, timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "设备响应超时")
+    finally:
+        pending.pop(expect, None)
+
+
+@app.get("/api/wifi/scan")
+async def api_wifi_scan() -> dict[str, Any]:
+    msg = await request_device({"type": "wifi.scan"}, "wifi.list", timeout=15.0)
+    return {"ok": bool(msg.get("ok")), "networks": msg.get("networks", []),
+            "current": msg.get("current"), "device_ip": msg.get("ip")}
+
+
+class WifiReq(BaseModel):
+    ssid: str
+    password: str = ""
+
+
+@app.post("/api/wifi")
+async def api_wifi(req: WifiReq) -> dict[str, Any]:
+    ssid = req.ssid.strip()
+    if not ssid:
+        raise HTTPException(400, "SSID 不能为空")
+    sent = await broadcast({"type": "wifi.set", "ssid": ssid, "password": req.password})
+    if sent == 0:
+        raise HTTPException(503, "没有在线设备")
+    # 切换会断连，设备多半来不及回结果；这里只确认已下发，结果看 status 里的 ip/ssid
+    log.info("已下发 WiFi 切换 -> %s", ssid)
+    return {"ok": True, "sent": sent, "ssid": ssid,
+            "note": "设备重连后若 IP 变化，控制台会在几秒内自动刷新为新的状态"}
+
+
+class ConsoleTextReq(BaseModel):
+    text: str
+
+
+@app.post("/api/text")
+async def api_text(req: ConsoleTextReq) -> dict[str, Any]:
+    """控制台打字对话：不走录音和 ASR，直接 Ollama + TTS"""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "内容不能为空")
+    if not clients:
+        raise HTTPException(503, "没有在线设备")
+
+    t0 = time.time()
+    await broadcast({"type": "state", "value": "thinking"})
+    await broadcast({"type": "clear"})
+    acc = ""
+
+    async def push(part: str) -> None:
+        nonlocal acc
+        acc = part
+        await broadcast({"type": "say", "text": part[:SAY_CHAR_LIMIT], "final": False})
+
+    try:
+        reply = await ollama_stream(text, push)
+    except Exception as exc:
+        log.error("控制台对话失败: %s", exc)
+        raise HTTPException(502, f"Ollama 调用失败: {exc}")
+
+    await broadcast({"type": "say", "text": reply[:SAY_CHAR_LIMIT], "final": True})
+    llm_ms = int((time.time() - t0) * 1000)
+
+    await broadcast({"type": "state", "value": "speaking"})
+    pcm = await asyncio.to_thread(tts_pcm, reply)
+    for off in range(0, len(pcm), 1600):
+        await broadcast_bytes(pcm[off:off + 1600])
+        await asyncio.sleep(0.05)
+    await broadcast({"type": "state", "value": "idle"})
+
+    entry = {
+        "ts": time.strftime("%H:%M:%S"),
+        "source": "console",
+        "user": text,
+        "reply": reply,
+        "asr_ms": 0,
+        "llm_ms": llm_ms,
+        "audio_sec": round(len(pcm) / 32000.0, 2),
+    }
+    history.appendleft(entry)
+    log.info("控制台对话完成：%d 字回复 / %.1f 秒语音", len(reply), len(pcm) / 32000.0)
+    return {"ok": True, **entry}
+
+
+@app.get("/api/history")
+async def api_history() -> dict[str, Any]:
+    return {"ok": True, "items": list(history)}
+
+
+@app.get("/api/logs")
+async def api_logs(limit: int = 120) -> dict[str, Any]:
+    n = max(10, min(400, limit))
+    return {"ok": True, "lines": list(log_lines)[-n:]}
+
+
 @app.post("/ask")
 async def ask(req: AskReq) -> dict[str, Any]:
     """走 Ollama 流式，边生成边推给设备"""
@@ -201,7 +456,7 @@ async def ask(req: AskReq) -> dict[str, Any]:
                 "POST",
                 f"{OLLAMA_URL}/api/chat",
                 json={
-                    "model": OLLAMA_MODEL,
+                    "model": current_model,
                     "messages": [{"role": "user", "content": req.text}],
                     "stream": True,
                     "think": False,
@@ -258,11 +513,11 @@ async def ollama_stream(prompt: str, push) -> str:
             "POST",
             f"{OLLAMA_URL}/api/chat",
             json={
-                "model": OLLAMA_MODEL,
+                "model": current_model,
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一个语音助手，回答必须用简体中文，控制在 60 字以内，短句口语化，适合直接朗读。",
+                        "content": system_prompt,
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -327,8 +582,10 @@ async def handle_utterance(ws: WebSocket, wav_path: str) -> None:
         return
 
     await ws.send_json({"type": "state", "value": "speaking"})
+    audio_sec = 0.0
     try:
         pcm = await asyncio.to_thread(tts_pcm, reply)
+        audio_sec = len(pcm) / 32000.0
         # 每帧 1600 字节（0.05 秒），保证小于设备端下行缓冲 2048
         # 广播给所有在线设备，不限于发起本次录音的那条连接
         recipients = 0
@@ -341,12 +598,46 @@ async def handle_utterance(ws: WebSocket, wav_path: str) -> None:
         log.error("TTS 失败: %s", exc)
     await ws.send_json({"type": "state", "value": "idle"})
 
+    history.appendleft(
+        {
+            "ts": time.strftime("%H:%M:%S"),
+            "source": "device",
+            "user": text,
+            "reply": reply,
+            "llm_ms": 0,
+            "audio_sec": round(audio_sec, 2),
+        }
+    )
+
 
 def handle_upstream(msg: dict[str, Any]) -> None:
     kind = msg.get("type")
     if kind == "hello":
-        device_info.update({"fw": msg.get("fw"), "chip": msg.get("chip")})
-        log.info("设备上线 fw=%s chip=%s", msg.get("fw"), msg.get("chip"))
+        device_info.update(
+            {
+                "fw": msg.get("fw"),
+                "chip": msg.get("chip"),
+                "ip": msg.get("ip"),
+                "rssi": msg.get("rssi"),
+                "ssid": msg.get("ssid"),
+                "uptime": msg.get("uptime"),
+                "last_seen": time.strftime("%H:%M:%S"),
+            }
+        )
+        log.info(
+            "设备上线 fw=%s ip=%s ssid=%s rssi=%s",
+            msg.get("fw"), msg.get("ip"), msg.get("ssid"), msg.get("rssi"),
+        )
+    elif kind in ("wifi.list", "wifi.result"):
+        # 控制台的等待请求在这里被唤醒
+        fut = pending.get(kind)
+        if fut is not None and not fut.done():
+            fut.set_result(msg)
+        if kind == "wifi.result":
+            log.info("WiFi 切换结果 ok=%s ssid=%s ip=%s",
+                     msg.get("ok"), msg.get("ssid"), msg.get("ip"))
+            if msg.get("ok"):
+                device_info.update({"ip": msg.get("ip"), "ssid": msg.get("ssid")})
     elif kind == "key":
         log.info("按键 idx=%s %s", msg.get("idx"), msg.get("action"))
     elif kind == "listen.start":
