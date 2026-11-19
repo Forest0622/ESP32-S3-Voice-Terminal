@@ -1,0 +1,19 @@
+menu "Voice Terminal"
+
+    config VOICE_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            STA 模式连接的 2.4GHz WiFi 名称。留空则开机后停留在配网页提示。
+
+    config VOICE_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+
+    config VOICE_SERVER_URL
+        string "Gateway WebSocket URL"
+        default "ws://192.168.1.100:8765/ws"
+        help
+            电脑端 gateway 的地址，形如 ws://192.168.1.100:8765/ws。
+
+endmenu
