@@ -152,6 +152,7 @@ OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 
 | 试听 | 下发任意文本的 TTS，不经过 ASR / LLM |
 | 音量 / 语速 | 音量写 ES8388 模拟输出寄存器（0~33），语速改 `say -r` |
 | 音色 | 切换 macOS 系统中文音色（婷婷 / 美佳 / 善怡），下一次播报立即生效 |
+| 语音引擎 | 在 macOS 系统语音与 CosyVoice2 之间切换；后者可零样本克隆任意人声，角色不限量（部署见 `gateway/COSYVOICE.md`） |
 | 人设 | 在线编辑 system prompt，对下一次对话立即生效 |
 | 对话记录 | 按键对话与控制台对话统一进历史，含耗时 |
 | 网关日志 | 内存环形缓冲 400 行，页面实时刷新 |

@@ -117,6 +117,34 @@
   </section>
 
   <section class="card">
+    <h2>语音引擎</h2>
+    <div class="row"><span class="k">当前</span><span class="v" id="eCur">—</span></div>
+    <div class="row">
+      <select id="selEngine"></select>
+      <button class="primary" id="btnEngine">切换</button>
+    </div>
+    <div class="hint" id="eHint">CosyVoice2 需要先在电脑上启动独立服务（端口 8770）。</div>
+  </section>
+
+  <section class="card">
+    <h2>CosyVoice 角色</h2>
+    <div class="row"><span class="k">当前</span><span class="v" id="cvCur">—</span></div>
+    <div class="row">
+      <select id="selCv"></select>
+      <button class="primary" id="btnCv">切换</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="cvName" placeholder="角色名" style="flex:0 0 110px">
+      <input id="cvText" placeholder="参考文本（音频原话）">
+    </div>
+    <div class="row">
+      <input id="cvFile" type="file" accept=".wav,.flac,.ogg,audio/*" style="flex:1;padding:5px">
+      <button id="btnCvAdd">上传建角色</button>
+    </div>
+    <div class="hint" id="cvHint">参考音频要 3~10 秒、单人、无背景音，格式 wav/flac/ogg。参考文本填音频里说的原话，越准克隆越像。</div>
+  </section>
+
+  <section class="card">
     <h2>音色角色</h2>
     <div class="row"><span class="k">当前</span><span class="v" id="vCur">—</span></div>
     <div class="row">
@@ -377,6 +405,54 @@ async function savePrompt(text) {
   });
 }
 
+/* ---------- 语音引擎 ---------- */
+async function loadEngines() {
+  try {
+    const d = await api('/api/engines');
+    const sel = $('selEngine');
+    sel.innerHTML = '';
+    d.engines.forEach(e => {
+      const o = document.createElement('option');
+      o.value = e.id;
+      o.textContent = `${e.name}${e.id === 'cosyvoice' && !d.cv_online ? '（未启动）' : ''}`;
+      if (e.id === d.current) o.selected = true;
+      sel.appendChild(o);
+      if (e.id === d.current) $('eCur').textContent = e.name;
+    });
+    $('eHint').textContent = d.cv_online
+      ? `CosyVoice 服务在线（${d.cv_url}）`
+      : `CosyVoice 未启动，仅 macOS 引擎可用`;
+  } catch (e) {
+    $('eHint').textContent = '读取引擎失败：' + e.message;
+  }
+}
+
+async function loadCvVoices() {
+  try {
+    const d = await api('/api/cv/voices');
+    const sel = $('selCv');
+    sel.innerHTML = '';
+    if (!d.ok) {
+      $('cvHint').textContent = d.error || 'CosyVoice 不可达';
+      return;
+    }
+    if (!d.voices.length) {
+      sel.innerHTML = '<option value="">还没有角色</option>';
+    }
+    d.voices.forEach(v => {
+      const o = document.createElement('option');
+      o.value = v.id;
+      o.textContent = v.id;
+      if (v.id === d.current) o.selected = true;
+      sel.appendChild(o);
+      if (v.id === d.current) $('cvCur').textContent = v.id;
+    });
+    $('cvHint').textContent = `${d.voices.length} 个角色，当前 ${d.current}`;
+  } catch (e) {
+    $('cvHint').textContent = '读取角色失败：' + e.message;
+  }
+}
+
 /* ---------- 音色 ---------- */
 async function loadVoices() {
   try {
@@ -410,6 +486,51 @@ $('btnModel').onclick = async () => {
     $('mHint').textContent = '已切换到 ' + name;
     pollStatus();
   } catch (e) { alert('切换失败：' + e.message); }
+};
+$('btnEngine').onclick = async () => {
+  const id = $('selEngine').value;
+  if (!id) return;
+  try {
+    await api('/api/engine', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    loadEngines();
+  } catch (e) { alert('切换失败：' + e.message); }
+};
+$('btnCv').onclick = async () => {
+  const id = $('selCv').value;
+  if (!id) return;
+  try {
+    await api('/api/cv/voice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    $('cvCur').textContent = id;
+    $('cvHint').textContent = '已切换为 ' + id;
+  } catch (e) { alert('切换失败：' + e.message); }
+};
+$('btnCvAdd').onclick = async () => {
+  const name = $('cvName').value.trim();
+  const f = $('cvFile').files[0];
+  if (!name) { alert('先填角色名'); return; }
+  if (!f) { alert('先选一个参考音频'); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('prompt_text', $('cvText').value.trim());
+  fd.append('file', f);
+  const btn = $('btnCvAdd');
+  btn.disabled = true; btn.textContent = '上传中…';
+  try {
+    const d = await api('/api/cv/voice/add', { method: 'POST', body: fd });
+    $('cvHint').textContent = `已创建角色 ${d.id}（${d.seconds}s 参考音频）`;
+    $('cvName').value = ''; $('cvText').value = ''; $('cvFile').value = '';
+    loadCvVoices();
+  } catch (e) {
+    alert('上传失败：' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '上传建角色';
+  }
 };
 $('btnVoice').onclick = async () => {
   const id = $('selVoice').value;
@@ -467,6 +588,8 @@ $('btnPromptReset').onclick = async () => {
 /* ---------- 启动 ---------- */
 pollStatus();
 loadModels();
+loadEngines();
+loadCvVoices();
 loadVoices();
 loadPrompt();
 loadHistory();
