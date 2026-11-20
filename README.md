@@ -131,11 +131,38 @@ cd gateway
 
 首次启动会自动下载 Whisper 模型（`small` 约 460MB，缓存到 `~/.cache/huggingface`）。
 
+### 用 launchd 托管网关（v1.5.4 新增，推荐）
+
+手动 `nohup` 起的进程，机器一重启就没了（8765 直接打不开）。用 launchd 托管解决这个问题：
+
+```bash
+./gw-ctl.sh start      # 首次加载并启动
+./gw-ctl.sh status     # 看 launchd / 端口 / 设备三段状态
+./gw-ctl.sh restart    # 重启
+./gw-ctl.sh stop       # 真正停止（烧录前必须用这个）
+./gw-ctl.sh logs       # tail 日志
+```
+
+托管配置文件：`~/Library/LaunchAgents/com.xiaoyi.esp32voice.gateway.plist`
+
+| 键 | 值 | 作用 |
+|---|---|---|
+| `RunAtLoad` | `true` | 登录即启动，不用手动开 |
+| `KeepAlive.SuccessfulExit` | `false` | 崩溃/被 kill 自动拉起，正常退出不拉起 |
+| `ThrottleInterval` | `10` | 拉起间隔，避免崩溃循环打满 CPU |
+| `StandardOutPath` | `~/Library/Logs/esp32-voice-gateway.log` | 日志统一放这里 |
+
+**重要**：烧录固件前必须 `./gw-ctl.sh stop`。`KeepAlive` 会把网关拉回来，而网关的 `serial_link` 占着 USB 串口，烧录会失败。`stop` 用的是 `launchctl bootout`，会连自动重启一起取消。
+
+实测：`kill -9` 掉进程后 18 秒内自动拉起，设备 WS 重连、`online` 恢复。
+
 默认模型 `qwen2.5:7b-instruct-q4_K_M`（实测 M1 Pro 热态 0.58 秒 / 8 token，首帧 0.29 秒），可用环境变量覆盖：
 
 ```bash
-OLLAMA_MODEL=其他模型 ./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 8765
+OLLAMA_MODEL=其他模型 ./gw-ctl.sh restart
 ```
+
+`gw-ctl.sh` 里的 `ProgramArguments` 是写死的，要改启动参数直接编辑 plist，或先 `stop` 再手动起。
 
 **不要用推理模型**：`qwen3:4b` 与 `deepseek-r1:8b` 实测会把思考链当正文吐出来（`think:false` 与 `/no_think` 在该 Ollama 版本下均无效），首句变成"嗯，用户让我……"，且首字延迟 18 秒以上。
 
