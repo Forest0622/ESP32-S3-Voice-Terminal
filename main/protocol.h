@@ -21,14 +21,15 @@
  *   {"type":"pong"}
  */
 
-#define VOICE_FW_VERSION "1.5.4"
+#define VOICE_FW_VERSION "1.5.5"
 
 /* 下行 type 取值 */
 #define MSG_SAY         "say"
 #define MSG_STATE       "state"
 #define MSG_CLEAR       "clear"
 #define MSG_WIFI_SCAN   "wifi.scan"   /* 请求扫描周边热点 */
-#define MSG_WIFI_SET    "wifi.set"    /* {ssid,password} 切换 WiFi 并写 NVS */
+#define MSG_WIFI_SET    "wifi.set"    /* {ssid,password,server?} 切换 WiFi 并写 NVS */
+#define MSG_SERVER_SET  "server.set"  /* {url} 只改网关地址，不碰 WiFi */
 #define MSG_VOLUME      "volume.set"  /* {value:0~33} 设置喇叭模拟音量 */
 
 /* 上行 type 取值（设备主动上报） */

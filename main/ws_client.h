@@ -7,6 +7,10 @@
 /* 启动 WebSocket 客户端，内部自动重连 */
 esp_err_t ws_client_start(void);
 
+/* 换网关地址并立即重连（device 端会先写 NVS，再调这个）。
+ * WS 还没起来时返回 ESP_ERR_INVALID_STATE，但地址已落盘，下次 start 生效 */
+esp_err_t ws_client_set_uri(const char *url);
+
 /* 是否已连上网关 */
 bool ws_client_connected(void);
 

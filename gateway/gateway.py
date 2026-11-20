@@ -3,7 +3,7 @@
 ESP32-S3 语音终端 - 电脑端网关（第 1 阶段：文本直通 + Ollama 流式）
 
 启动：
-    uvicorn gateway:app --host 0.0.0.0 --port 8765
+    uvicorn gateway:app --host 0.0.0.0 --port 8890
 
 接口：
     WS   /ws                    设备连接
@@ -244,7 +244,7 @@ async def tts(req: SayReq) -> dict[str, Any]:
 
 @app.get("/", include_in_schema=False)
 async def console_page():
-    """浏览器打开 http://<mac-ip>:8765/ 即为控制台"""
+    """浏览器打开 http://<mac-ip>:8890/ 即为控制台"""
     if not os.path.exists(CONSOLE_HTML):
         raise HTTPException(500, "console.html 缺失")
     return FileResponse(CONSOLE_HTML, media_type="text/html")
@@ -262,7 +262,7 @@ async def api_status() -> dict[str, Any]:
         "speech_rate": SPEECH_RATE,
         "voice": VOICE,
         "usb": serial_link.status(),
-        "server_url": f"ws://{_lan_ip()}:8765/ws" if _lan_ip() else "",
+        "server_url": f"ws://{_lan_ip()}:8890/ws" if _lan_ip() else "",
         "uptime": round(time.time() - START_TS, 1),
     }
 
@@ -445,7 +445,7 @@ async def api_wifi(req: WifiReq) -> dict[str, Any]:
     if not ssid:
         raise HTTPException(400, "SSID 不能为空")
     lan = _lan_ip()
-    server_url = f"ws://{lan}:8765/ws" if lan else ""
+    server_url = f"ws://{lan}:8890/ws" if lan else ""
     payload = {"type": "wifi.set", "ssid": ssid, "password": req.password}
     if server_url:
         payload["server"] = server_url
@@ -456,6 +456,27 @@ async def api_wifi(req: WifiReq) -> dict[str, Any]:
     log.info("已下发 WiFi 切换 -> %s（server=%s）", ssid, server_url or "未附带")
     return {"ok": True, "sent": sent, "ssid": ssid, "server": server_url,
             "note": "设备重连后若 IP 变化，控制台会在几秒内自动刷新为新的状态"}
+
+
+class ServerReq(BaseModel):
+    url: str = ""
+
+
+@app.post("/api/server")
+async def api_server(req: ServerReq) -> dict[str, Any]:
+    """只改网关地址，不碰 WiFi。
+
+    用途：Mac 换网后局域网 IP 变了，或者网关换了端口，用这个把新地址推给设备，
+    设备写进 NVS 并立刻用新地址重连 WS。不用重新配网，WiFi 也不会断。
+    """
+    url = req.url.strip() or (f"ws://{_lan_ip()}:8890/ws" if _lan_ip() else "")
+    if not url:
+        raise HTTPException(400, "无法确定网关地址，请显式传入 url")
+    sent = await broadcast({"type": "server.set", "url": url})
+    if sent == 0:
+        raise HTTPException(503, "没有在线设备")
+    log.info("已下发网关地址 -> %s", url)
+    return {"ok": True, "sent": sent, "url": url}
 
 
 class ConsoleTextReq(BaseModel):
@@ -809,6 +830,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
 @app.on_event("startup")
 async def _startup_usb_link() -> None:
-    """USB 串口是控制面的第二通道：插上线就能用，不依赖 WiFi 网段"""
+    """USB 串口是控制面的第二通道：插上线就能用，不依赖 WiFi 网段。
+
+    但这块板子的 USB 口同一时刻只能被一个进程打开。如果本机还有别的程序
+    （例如智能药房检修台）也要连这块板子，就必须让出一边，否则两边都打不开。
+    设 VOICE_GW_USB=0 可以让本网关只走 WiFi，不碰串口。
+    """
+    if os.environ.get("VOICE_GW_USB", "1") == "0":
+        log.info("VOICE_GW_USB=0：跳过 USB 串口通道，只用 WiFi")
+        return
     serial_link.start(handle_upstream)
     log.info("USB 串口通道启动，自动发现 /dev/cu.usbmodem*")

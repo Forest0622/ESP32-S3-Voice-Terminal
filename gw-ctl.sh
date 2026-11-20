@@ -38,7 +38,7 @@ case "${1:-status}" in
       echo "服务未加载"
     fi
     # 兜底：清掉可能残留的手动进程
-    PID=$(lsof -nP -iTCP:8765 -sTCP:LISTEN -t 2>/dev/null | head -1)
+    PID=$(lsof -nP -iTCP:8890 -sTCP:LISTEN -t 2>/dev/null | head -1)
     if [ -n "${PID:-}" ]; then
       kill -9 "$PID" 2>/dev/null
       echo "已清理残留进程 $PID"
@@ -59,10 +59,10 @@ case "${1:-status}" in
     fi
 
     echo "--- 端口 ---"
-    lsof -nP -iTCP:8765 -sTCP:LISTEN 2>/dev/null | tail -1 || echo "8765 无监听"
+    lsof -nP -iTCP:8890 -sTCP:LISTEN 2>/dev/null | tail -1 || echo "8890 无监听"
 
     echo "--- 设备 ---"
-    RESP=$(curl -s -m 8 http://127.0.0.1:8765/api/status 2>/dev/null)
+    RESP=$(curl -s -m 8 http://127.0.0.1:8890/api/status 2>/dev/null)
     if [ -z "$RESP" ]; then
       echo "网关不可达"
     else

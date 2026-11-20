@@ -207,6 +207,18 @@ void ws_handle_json(const char *buf)
                 xTaskCreate(wifi_set_task, "wifi_set", 4096, req, 5, NULL);
             }
         }
+    } else if (strcmp(type, MSG_SERVER_SET) == 0) {
+        cJSON *jurl = cJSON_GetObjectItem(root, "url");
+        if (!cJSON_IsString(jurl) || strlen(jurl->valuestring) == 0) {
+            ESP_LOGW(TAG, "server.set 缺少 url");
+        } else {
+            esp_err_t sret = wifi_mgr_set_server(jurl->valuestring);
+            if (sret == ESP_OK) {
+                ws_client_set_uri(jurl->valuestring);
+            } else {
+                ESP_LOGW(TAG, "写入网关地址失败: %s", esp_err_to_name(sret));
+            }
+        }
     } else if (strcmp(type, MSG_VOLUME) == 0) {
         cJSON *jval = cJSON_GetObjectItem(root, "value");
         if (cJSON_IsNumber(jval)) {
@@ -372,6 +384,32 @@ esp_err_t ws_client_start(void)
 
     ESP_LOGI(TAG, "连接 %s", uri);
     /* hello 由 CONNECTED 事件里的 hello_task 统一上报，此处不重复发 */
+    return ESP_OK;
+}
+
+esp_err_t ws_client_set_uri(const char *url)
+{
+    if (url == NULL || strlen(url) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_client == NULL) {
+        /* WS 还没起来（例如出厂态刚配完网），NVS 已经写好，等 ws_client_start 用新地址 */
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = esp_websocket_client_set_uri(s_client, url);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "设置 URI 失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    esp_websocket_client_stop(s_client);   /* 已停止时会返回错误，忽略 */
+    vTaskDelay(pdMS_TO_TICKS(400));
+    ret = esp_websocket_client_start(s_client);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "用新地址重启 WS 失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "WS 已切到 %s", url);
     return ESP_OK;
 }
 

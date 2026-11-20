@@ -118,7 +118,7 @@ idf.py -p /dev/cu.usbmodem21301 flash monitor
 |---|---|
 | `VOICE_WIFI_SSID` | 你的 2.4GHz WiFi |
 | `VOICE_WIFI_PASSWORD` | 密码（开放网络留空） |
-| `VOICE_SERVER_URL` | `ws://192.168.1.100:8765/ws`（填电脑的局域网 IP） |
+| `VOICE_SERVER_URL` | `ws://192.168.1.100:8890/ws`（填电脑的局域网 IP） |
 
 ## 网关启动
 
@@ -126,14 +126,14 @@ idf.py -p /dev/cu.usbmodem21301 flash monitor
 cd gateway
 /opt/homebrew/bin/python3.12 -m venv .venv      # 必须 3.12，ctranslate2 还没有 3.14 的 wheel
 ./.venv/bin/pip install -r requirements.txt faster-whisper
-./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 8765
+./.venv/bin/uvicorn gateway:app --host 0.0.0.0 --port 8890
 ```
 
 首次启动会自动下载 Whisper 模型（`small` 约 460MB，缓存到 `~/.cache/huggingface`）。
 
 ### 用 launchd 托管网关（v1.5.4 新增，推荐）
 
-手动 `nohup` 起的进程，机器一重启就没了（8765 直接打不开）。用 launchd 托管解决这个问题：
+手动 `nohup` 起的进程，机器一重启就没了（8890 直接打不开）。用 launchd 托管解决这个问题：
 
 ```bash
 ./gw-ctl.sh start      # 首次加载并启动
@@ -168,7 +168,7 @@ OLLAMA_MODEL=其他模型 ./gw-ctl.sh restart
 
 ## 控制台（v1.4.0 新增）
 
-**浏览器打开 `http://127.0.0.1:8765/`**。用本机地址而不是网卡 IP：Mac 换到别的 WiFi（热点、别人家网络）后网卡 IP 会变，旧地址就打不开了，而 `127.0.0.1` 永远指向本机。
+**浏览器打开 `http://127.0.0.1:8890/`**。用本机地址而不是网卡 IP：Mac 换到别的 WiFi（热点、别人家网络）后网卡 IP 会变，旧地址就打不开了，而 `127.0.0.1` 永远指向本机。
 
 纯单文件 HTML，不依赖任何前端库。
 
@@ -202,7 +202,7 @@ OLLAMA_MODEL=其他模型 ./gw-ctl.sh restart
 
 用法：
 
-1. 数据线插上，浏览器开 `http://127.0.0.1:8765/`
+1. 数据线插上，浏览器开 `http://127.0.0.1:8890/`
 2. 设备状态卡片看「USB」一行，显示 `已连接 /dev/cu.usbmodem*` 即通
 3. 「WiFi 切换」→ 扫描周边 → 选网络 → 填密码 → 切换
 4. 设备连上新网络后自动重连 WiFi 链路，音频功能恢复
@@ -250,7 +250,7 @@ ESP32 是单射频单天线，同一时刻只能待在一个信道。2.4G 有 13
 
 ### 换网/失联时的恢复顺序（v1.5.1）
 
-1. Mac 换网后 IP 会变 → 控制台固定用 `http://127.0.0.1:8765/`，不要用旧 IP
+1. Mac 换网后 IP 会变 → 控制台固定用 `http://127.0.0.1:8890/`，不要用旧 IP
 2. 设备 NVS 里的凭据优先于编译期默认值 → 如果它记着一个已关闭的热点，会一直 RSSI 0
 3. 控制台「WiFi 切换」不生效时，用 `idf.py erase-flash` 清 NVS，让固件回落到 `CONFIG_VOICE_WIFI_SSID`
 4. 清完必须重新 `flash`，否则烧录的固件还是旧的
@@ -269,12 +269,12 @@ v1.5.2 的修法：
 | `on_wifi_event` | 加 `has_ssid` 判断，空 SSID 不反复 `esp_wifi_connect` 空转 |
 | 网关地址 | 新增 NVS key `srv`，`wifi.set` 可带 `server` 字段一起下发 |
 | `ws_client_start` | 改用 `wifi_mgr_server()`，空 URI 时明确跳过 |
-| 网关 `api_wifi` | 自动附带 `ws://<lan_ip>:8765/ws` |
+| 网关 `api_wifi` | 自动附带 `ws://<lan_ip>:8890/ws` |
 | 网关 `_lan_ip` | 读 `ipconfig getifaddr en0`，排除 `198.18.x.x`（Clash/VPN 的 TUN 段） |
 
 操作步骤：
 
-1. 数据线插上，浏览器开 `http://127.0.0.1:8765/`
+1. 数据线插上，浏览器开 `http://127.0.0.1:8890/`
 2. 「设备状态」看到 **USB 已连接**，`IP` 显示 `0.0.0.0`、`SSID` 为空——这就是出厂态
 3. 「WiFi 切换」点「扫描周边」选网络（未联网时也能扫，实测 9 个 AP），或直接手填 SSID
 4. 填密码 → 「切换」。网关地址会随配网一起下发，卡片底部能看到当前值
